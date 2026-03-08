@@ -1,8 +1,8 @@
 import os
 import requests
 from datetime import date
+import asyncio
 from fastapi import FastAPI
-import threading
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,10 +17,19 @@ from telegram.ext import (
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+# ==============================
+# FastAPI
+# ==============================
 app = FastAPI()
 
+@app.get("/")
+def home():
+    return {"status": "Options Alert Bot is running"}
+
+# ==============================
 # الأسهم المراد مراقبتها
-STOCKS = ["AAPL", "MSFT"]  # يمكنك إضافة المزيد لاحقًا
+# ==============================
+STOCKS = ["AAPL", "MSFT"]  # يمكن إضافة المزيد لاحقًا
 
 # ==============================
 # دالة لجلب تقرير عقود الخيارات
@@ -77,7 +86,7 @@ async def send_report(context: ContextTypes.DEFAULT_TYPE):
     for stock in STOCKS:
         full_report += fetch_options_report(stock) + "\n" + ("-"*30) + "\n"
 
-    # تقسيم الرسائل الطويلة
+    # تقسيم الرسائل الطويلة (>4096 حرف)
     for chunk in [full_report[i:i+4000] for i in range(0, len(full_report), 4000)]:
         await context.bot.send_message(chat_id=chat_id, text=chunk)
     print(f"Report sent to chat {chat_id} ✅")
@@ -89,7 +98,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text("✅ You are now subscribed to Options Reports every 5 minutes.")
 
-    # إرسال تقرير فوري
+    # إرسال تقرير فوري عند الاشتراك
     full_report = ""
     for stock in STOCKS:
         full_report += fetch_options_report(stock) + "\n" + ("-"*30) + "\n"
@@ -109,32 +118,29 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 You have unsubscribed from Options Reports.")
 
 # ==============================
-# تشغيل بوت Telegram في Thread منفصل
+# الدالة الرئيسية لتشغيل FastAPI + Telegram Bot
 # ==============================
-def start_telegram_bot():
-    app_bot = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+async def main():
+    # إعداد البوت
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("stop", stop))
-
-    print("🚀 Options Telegram Bot is running...")
-    app_bot.run_polling()
-
-# ==============================
-# FastAPI Route للتحقق من حالة البوت
-# ==============================
-@app.get("/")
-def home():
-    return {"status": "Options Alert Bot is running"}
-
-# ==============================
-# تشغيل FastAPI و Telegram معًا
-# ==============================
-if __name__ == "__main__":
-    import uvicorn
-
-    # تشغيل البوت في Thread منفصل
-    threading.Thread(target=start_telegram_bot, daemon=True).start()
+    # تشغيل البوت
+    await application.initialize()
+    await application.start()
+    print("🚀 Telegram Bot is running...")
 
     # تشغيل FastAPI
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
+    server = uvicorn.Server(config)
+
+    # تشغيل كلاهما في نفس الحدث
+    await asyncio.gather(server.serve(), application.updater.start_polling())
+
+# ==============================
+# تشغيل التطبيق
+# ==============================
+if __name__ == "__main__":
+    asyncio.run(main())
