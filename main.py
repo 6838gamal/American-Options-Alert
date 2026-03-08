@@ -1,11 +1,15 @@
 import os
 import requests
 from datetime import date
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext, JobQueue
 from fastapi import FastAPI
 import threading
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    JobQueue,
+)
 
 # ==============================
 # متغيرات البيئة
@@ -13,16 +17,13 @@ import threading
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
 app = FastAPI()
 
-# ==============================
 # الأسهم المراد مراقبتها
-# ==============================
 STOCKS = ["AAPL", "MSFT"]  # يمكنك إضافة المزيد لاحقًا
 
 # ==============================
-# دالة لجلب تقرير عقود الخيارات لكل سهم
+# دالة لجلب تقرير عقود الخيارات
 # ==============================
 def fetch_options_report(underlying: str):
     today = date.today()
@@ -66,56 +67,58 @@ Premium: ${premium:,.2f}
     return "\n".join(report_lines) if report_lines else f"No trading data today for {underlying}."
 
 # ==============================
-# دالة إرسال التقرير للمستخدم
+# دالة لإرسال التقرير للمستخدم
 # ==============================
-def send_report(context: CallbackContext):
-    chat_id = context.job.context
+async def send_report(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id = job.chat_id
+
     full_report = ""
     for stock in STOCKS:
         full_report += fetch_options_report(stock) + "\n" + ("-"*30) + "\n"
 
-    # تقسيم الرسائل إذا كانت طويلة جدًا
+    # تقسيم الرسائل الطويلة
     for chunk in [full_report[i:i+4000] for i in range(0, len(full_report), 4000)]:
-        context.bot.send_message(chat_id=chat_id, text=chunk)
+        await context.bot.send_message(chat_id=chat_id, text=chunk)
     print(f"Report sent to chat {chat_id} ✅")
 
 # ==============================
 # أوامر البوت
 # ==============================
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    update.message.reply_text("✅ You are now subscribed to Options Reports every 5 minutes.")
+    await update.message.reply_text("✅ You are now subscribed to Options Reports every 5 minutes.")
 
     # إرسال تقرير فوري
     full_report = ""
     for stock in STOCKS:
         full_report += fetch_options_report(stock) + "\n" + ("-"*30) + "\n"
+
     for chunk in [full_report[i:i+4000] for i in range(0, len(full_report), 4000)]:
-        context.bot.send_message(chat_id=chat_id, text=chunk)
+        await context.bot.send_message(chat_id=chat_id, text=chunk)
 
     # إضافة مهمة إرسال التقارير كل 5 دقائق
-    context.job_queue.run_repeating(send_report, interval=300, first=300, context=chat_id, name=str(chat_id))
+    context.job_queue.run_repeating(send_report, interval=300, first=300, chat_id=chat_id)
 
-def stop(update: Update, context: CallbackContext):
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    jobs = context.job_queue.get_jobs()
     for job in jobs:
-        job.schedule_removal()
-    update.message.reply_text("🛑 You have unsubscribed from Options Reports.")
+        if job.chat_id == chat_id:
+            job.schedule_removal()
+    await update.message.reply_text("🛑 You have unsubscribed from Options Reports.")
 
 # ==============================
 # تشغيل بوت Telegram في Thread منفصل
 # ==============================
 def start_telegram_bot():
-    updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    app_bot = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("stop", stop))
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("stop", stop))
 
     print("🚀 Options Telegram Bot is running...")
-    updater.start_polling()
-    updater.idle()
+    app_bot.run_polling()
 
 # ==============================
 # FastAPI Route للتحقق من حالة البوت
@@ -129,5 +132,9 @@ def home():
 # ==============================
 if __name__ == "__main__":
     import uvicorn
+
+    # تشغيل البوت في Thread منفصل
     threading.Thread(target=start_telegram_bot, daemon=True).start()
+
+    # تشغيل FastAPI
     uvicorn.run(app, host="0.0.0.0", port=8000)
